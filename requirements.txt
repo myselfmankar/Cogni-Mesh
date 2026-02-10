@@ -1,0 +1,53 @@
+# Core Application
+fastapi[standard]
+uvicorn
+python-dotenv
+python-multipart
+
+# AI Frameworks & Orchestration (Modern v0.10+ Stack)
+llama-index-core
+llama-index-llms-openai
+llama-index-embeddings-openai
+llama-index-graph-stores-neo4j
+llama-index-vector-stores-chroma
+# Removed llama-index (legacy wrapper) and setuptools
+langchain
+langchain-google-genai
+langchain-community
+
+# Google Gemini SDK (Latest)
+google-generativeai>=0.8.0
+
+# Vector Database
+chromadb
+
+# Graph Database
+neo4j
+
+# Data Ingestion & Processing
+pypdf
+pymupdf
+python-pptx
+python-docx
+pandas
+openpyxl
+spacy
+beautifulsoup4
+
+# Reranking (2026 Upgrade)
+cohere
+llama-index-postprocessor-cohere-rerank
+
+# BM25 for Hybrid Search
+rank-bm25
+
+# Local Embeddings (Reliable)
+sentence-transformers
+torch
+
+# Utilities
+httpx
+loguru
+tqdm
+setuptools 
+wheel

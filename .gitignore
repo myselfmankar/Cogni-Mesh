@@ -1,0 +1,7 @@
+chroma_db/
+neo4j_db/
+.docs/
+bm25_index.pkl
+.venv
+__pycache__
+.env
