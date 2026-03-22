@@ -4,27 +4,22 @@ uvicorn
 python-dotenv
 python-multipart
 
-# AI Frameworks & Orchestration (Modern v0.10+ Stack)
+# AI Frameworks & Orchestration 
 llama-index-core
-llama-index-llms-openai
-llama-index-embeddings-openai
+llama-index-llms-gemini
+llama-index-embeddings-gemini
 llama-index-graph-stores-neo4j
 llama-index-vector-stores-chroma
-# Removed llama-index (legacy wrapper) and setuptools
 langchain
 langchain-google-genai
 langchain-community
+llama-parse
 
-# Google Gemini SDK (Latest)
-google-generativeai>=0.8.0
+google-genai
 
-# Vector Database
 chromadb
 
-# Graph Database
 neo4j
-
-# Data Ingestion & Processing
 pypdf
 pymupdf
 python-pptx
@@ -34,18 +29,14 @@ openpyxl
 spacy
 beautifulsoup4
 
-# Reranking (2026 Upgrade)
 cohere
 llama-index-postprocessor-cohere-rerank
 
-# BM25 for Hybrid Search
 rank-bm25
 
-# Local Embeddings (Reliable)
 sentence-transformers
 torch
 
-# Utilities
 httpx
 loguru
 tqdm

@@ -2,13 +2,13 @@
 import logging
 from typing import List, Dict, Optional
 from neo4j import GraphDatabase
-from llama_index.llms.openai import OpenAI
+from llama_index.llms.gemini import Gemini
 from . import config
 
 class GraphService:
     def __init__(self):
         self.driver = None
-        self.llm = OpenAI(model="gpt-4o-mini", api_key=config.OPENAI_API_KEY, temperature=0.1)
+        self.llm = Gemini(model="models/gemini-2.5-flash", api_key=config.GOOGLE_API_KEY, temperature=0.1)
         
         if config.USE_NEO4J:
             try:
@@ -16,9 +16,9 @@ class GraphService:
                     config.NEO4J_URI,
                     auth=(config.NEO4J_USERNAME, config.NEO4J_PASSWORD)
                 )
-                logging.info("✅ Neo4j connection established")
+                logging.info("Neo4j connection established")
             except Exception as e:
-                logging.warning(f"⚠️  Neo4j connection failed: {e}. Graph features disabled.")
+                logging.warning(f"Neo4j connection failed: {e}. Graph features disabled.")
                 self.driver = None
     
     def close(self):

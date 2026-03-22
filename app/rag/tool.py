@@ -4,9 +4,9 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 from llama_index.core import VectorStoreIndex, StorageContext, Settings
 from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.llms.openai import OpenAI
-from llama_index.program.openai import OpenAIPydanticProgram
+from llama_index.embeddings.gemini import GeminiEmbedding
+from llama_index.llms.gemini import Gemini
+from llama_index.core.program import LLMTextCompletionProgram
 from . import config
 
 # Setup Logging
@@ -26,10 +26,12 @@ class RagResponse(BaseModel):
     Structured response containing summary, insights, and actionable tasks derived from the knowledge base.
     """
     summary: str = Field(..., description="Comprehensive summary of the matched content")
+    step_by_step_solution: Optional[str] = Field(None, description="Detailed pedagogical step-by-step solution for the query")
     key_insights: List[str] = Field(
         ..., 
         description="List of 2-5 key insights derived from the content. Extract the most important findings."
     )
+    learning_objectives: List[str] = Field(default_factory=list, description="What the student should learn from this answer")
     tasks: List[Task] = Field(
         default_factory=list,
         description="ALL actionable tasks identified in the content. Extract every task mentioned, no matter how many. Can be 0 to 20+ tasks depending on content."
@@ -91,14 +93,13 @@ class RagAgentTool:
                embed_model = VertexTextEmbedding()
             """
             
-            logger.info(f"Loading embedding model: {config.EMBEDDING_MODEL}")
-            embed_model = OpenAIEmbedding(
-                model=config.EMBEDDING_MODEL,
-                max_retries=config.RETRY_MAX_ATTEMPTS
+            embed_model = GeminiEmbedding(
+                model_name=config.EMBEDDING_MODEL,
+                api_key=config.GOOGLE_API_KEY
             )
             Settings.embed_model = embed_model
             
-            Settings.llm = OpenAI(model="gpt-3.5-turbo", temperature=0)
+            Settings.llm = Gemini(model="models/gemini-2.5-flash", api_key=config.GOOGLE_API_KEY, temperature=0)
 
             logger.info(f"Connecting to ChromaDB at {config.CHROMA_DB_DIR}")
             db = chromadb.PersistentClient(path=config.CHROMA_DB_DIR)
@@ -129,6 +130,7 @@ class RagAgentTool:
             source_filenames = list(set([n.metadata.get("filename", "unknown") for n in nodes]))
             
             prompt_template_str = (
+                "You are a Stellar Study Agent. Your goal is to help a student master their subjects and solve PYQs (Previous Year Questions) with precision.\n"
                 "Context information is below.\n"
                 "---------------------\n"
                 "{context_str}\n"
@@ -136,14 +138,14 @@ class RagAgentTool:
                 "Given the context information and not prior knowledge, "
                 "answer the query: {query_str}\n\n"
                 "IMPORTANT INSTRUCTIONS:\n"
-                "1. Extract ALL actionable tasks mentioned in the context, no matter how many (could be 0, could be 20+)\n"
-                "2. Generate 2-5 key insights that capture the most important findings\n"
-                "3. Provide a comprehensive summary\n"
-                "4. Do NOT limit yourself to a fixed number of tasks - extract every single task you find\n"
-                "5. Provide all source URLs in a proper format (e.g., [Title](URL)) if available in the context.\n"
+                "1. If the query is a question or problem (like a PYQ), provide a clear, pedagogical step-by-step solution in 'step_by_step_solution'.\n"
+                "2. Generate 2-5 key insights for exam preparation.\n"
+                "3. List 3-5 learning objectives that capture what the student will learn.\n"
+                "4. Extract ALL actionable tasks (e.g., 'Solve 5 practice problems').\n"
+                "5. Provide a comprehensive summary of core concepts.\n"
             )
             
-            program = OpenAIPydanticProgram.from_defaults(
+            program = LLMTextCompletionProgram.from_defaults(
                 output_cls=RagResponse,
                 prompt_template_str=prompt_template_str,
                 llm=Settings.llm

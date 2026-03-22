@@ -52,6 +52,49 @@ class ContentExtractor:
             return None
 
     def _extract_pdf(self, file_path: str) -> Dict[str, Any]:
+        from . import config
+        
+        # Setup cache path
+        cache_dir = os.path.join(os.path.dirname(file_path), ".cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, os.path.basename(file_path) + ".md")
+
+        # 1. Quick Local Cache Check
+        if os.path.exists(cache_path):
+            logging.info(f"Loaded parsed text from local cache instantly: {cache_path}")
+            with open(cache_path, "r", encoding="utf-8") as f:
+                text = f.read()
+            return {
+                "text": text,
+                "metadata": {"file_type": "pdf", "parsed_by": "llamaparse_cached"}
+            }
+            
+        # Try LlamaParse first if key is available
+        if getattr(config, "LLAMA_PARSE_KEY", None):
+            try:
+                logging.info(f"Using LlamaParse for {file_path} (this may take a moment...)")
+                from llama_parse import LlamaParse
+                parser = LlamaParse(
+                    api_key=config.LLAMA_PARSE_KEY, 
+                    result_type="markdown",
+                    verbose=False
+                )
+                docs = parser.load_data(file_path)
+                text = "\n\n".join([doc.text for doc in docs])
+                
+                # Save to cache
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                logging.info(f"Successfully cached LlamaParse text to {cache_path}")
+                
+                return {
+                    "text": text,
+                    "metadata": {"file_type": "pdf", "parsed_by": "llamaparse", "pages": len(docs)}
+                }
+            except Exception as e:
+                logging.error(f"LlamaParse failed: {e}. Falling back to PyMuPDF.")
+                
+        # Fallback to standard extraction
         doc = fitz.open(file_path)
         text = ""
         for page in doc:

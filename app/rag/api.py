@@ -2,12 +2,15 @@ import os
 import chromadb
 import logging
 import pickle
-from fastapi import FastAPI, HTTPException
+import shutil
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 from llama_index.core import VectorStoreIndex, StorageContext, Settings
 from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.embeddings.gemini import GeminiEmbedding
+from llama_index.llms.gemini import Gemini
+from llama_index.core.program import LLMTextCompletionProgram
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.postprocessor.cohere_rerank import CohereRerank
 from rank_bm25 import BM25Okapi
@@ -30,7 +33,9 @@ class RagResponse(BaseModel):
     Structured response containing summary, insights, and actionable tasks derived from the knowledge base.
     """
     summary: str = Field(..., description="Comprehensive summary of the matched content")
+    step_by_step_solution: Optional[str] = Field(None, description="Detailed pedagogical step-by-step solution for the query")
     key_insights: List[str] = Field(..., description="List of key insights derived")
+    learning_objectives: List[str] = Field(default_factory=list, description="What the student should learn from this answer")
     tasks: List[Task] = Field(..., description="Actionable tasks identified")
     sources: List[str] = Field(..., description="List of source filenames used")
     faithfulness_score: float = Field(..., description="Self-evaluated score (0.0-1.0) of how grounded the answer is in the context")
@@ -51,15 +56,12 @@ async def lifespan(app: FastAPI):
     global query_engine, bm25_data, graph_service
     
     try:
-        # 1. Setup Embedding (OpenAI - reliable!)
-        logging.info(f"Loading embedding model: {config.EMBEDDING_MODEL}")
-        embed_model = OpenAIEmbedding(model=config.EMBEDDING_MODEL, api_key=config.OPENAI_API_KEY)
+        # 1. Setup Embedding (Gemini)
+        embed_model = GeminiEmbedding(model_name=config.EMBEDDING_MODEL, api_key=config.GOOGLE_API_KEY)
         Settings.embed_model = embed_model
         
-        # 2. Setup LLM (OpenAI)
-        from llama_index.llms.openai import OpenAI
-        logging.info("Initializing OpenAI LLM...")
-        llm = OpenAI(model="gpt-4o-mini", api_key=config.OPENAI_API_KEY, temperature=0.1)
+        # 2. Setup LLM (Gemini)
+        llm = Gemini(model="models/gemini-2.5-flash", api_key=config.GOOGLE_API_KEY, temperature=0.1)
         Settings.llm = llm
 
         # 3. Connect to ChromaDB
@@ -80,9 +82,9 @@ async def lifespan(app: FastAPI):
             if os.path.exists(bm25_path):
                 with open(bm25_path, "rb") as f:
                     bm25_data = pickle.load(f)
-                logging.info("✅ BM25 index loaded")
+                logging.info("BM25 index loaded")
             else:
-                logging.warning("⚠️  BM25 index not found. Run ingestion first.")
+                logging.warning("BM25 index not found. Run ingestion first.")
         
         # 6. Initialize Graph Service
         if config.USE_NEO4J:
@@ -93,11 +95,9 @@ async def lifespan(app: FastAPI):
         if config.USE_RERANKING and config.COHERE_API_KEY:
             try:
                 reranker = CohereRerank(api_key=config.COHERE_API_KEY, top_n=5)
-                logging.info("✅ Cohere reranker initialized")
+                logging.info("Cohere reranker initialized")
             except Exception as e:
-                logging.warning(f"⚠️  Reranker initialization failed: {e}")
-        
-        # 8. Create Hybrid Query Engine
+                logging.warning(f"Reranker initialization failed: {e}")        # 8. Create Hybrid Query Engine
         def custom_query(query_str: str) -> RagResponse:
             # Step 1: Check for knowledge gaps (Neo4j)
             prerequisite_context = ""
@@ -120,7 +120,6 @@ async def lifespan(app: FastAPI):
                 bm25_scores = bm25_data["bm25"].get_scores(query_tokens)
                 top_bm25_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:10]
                 
-                # Convert to NodeWithScore format
                 from llama_index.core.schema import NodeWithScore, TextNode
                 for idx in top_bm25_indices:
                     doc = bm25_data["documents"][idx]
@@ -135,81 +134,39 @@ async def lifespan(app: FastAPI):
             context_str = "\n\n".join([n.node.get_content() for n in nodes[:5]])
             source_filenames = list(set([n.node.metadata.get("filename", "unknown") for n in nodes[:5]]))
             
-            # Step 5: Generate structured response
-            json_prompt = (
-                f"Answer the following query based on the context: {query_str}\n"
-                f"{prerequisite_context}\n"
-                "\nContext:\n" + context_str + "\n\n"
-                "Provide the response in valid JSON format with the following keys:\n"
-                "- summary: Detailed, comprehensive summary (at least 3-4 paragraphs of depth)\n"
-                "- key_insights: List of 5-7 actionable insights\n"
-                "- tasks: List of objects with keys 'title', 'description', 'status'. (infer status as 'Pending', 'In Progress', or 'Completed')\n"
-                "- critique: Critical evaluation of the answer's quality and completeness based ONLY on the context provided.\n"
-                "- faithfulness_score: float between 0.0 and 1.0 (1.0 = fully supported by context, < 0.5 = major hallucinations)\n" 
-                "Ensure strict JSON compliance. Do NOT wrap the output in markdown."
+            # Step 5: Structured Generation using LlamaIndex Program
+            prompt_template_str = (
+                "You are a Stellar Study Agent. Your goal is to help a student master their subjects and solve PYQs (Previous Year Questions) with precision.\n"
+                "Answer the following query based on the context: {query_str}\n"
+                "{prerequisite_context}\n"
+                "\nContext:\n" + "{context_str}" + "\n\n"
+                "IMPORTANT:\n"
+                "- summary: Detailed, comprehensive summary of the core concepts\n"
+                "- step_by_step_solution: If the query is a question or problem, provide a clear, pedagogical step-by-step solution\n"
+                "- key_insights: List of 5-7 actionable insights for exam preparation\n"
+                "- learning_objectives: List what the student will learn from this explanation\n"
+                "- tasks: List of tasks with 'title', 'description', 'status' (e.g., 'Solve 5 practice problems')\n"
+                "- critique: Evaluation of the answer quality from a teacher's perspective\n"
+                "- faithfulness_score: float (0.0-1.0) grounded strictly in context"
             )
-            
-            # Use OpenAI's native JSON mode for reliability
-            response = llm.complete(
-                json_prompt,
-                formatted=True, 
-                # LlamaIndex OpenAI integration supports output parsing but here we force text
-                # Ideally we'd use Pydantic program, but let's fix the string parsing first
-            )
-            
-            # Parse response
-            import json
-            import re
-            
-            text = str(response)
-            # Remove markdown code blocks if present
-            clean_text = re.sub(r'```json\s*|\s*```', '', text).strip()
-            
-            try:
-                # Try parsing cleaned text directly first
-                data = json.loads(clean_text)
-            except json.JSONDecodeError:
-                # Fallback to regex extraction if direct parse fails
-                match = re.search(r'\{.*\}', text, re.DOTALL)
-                if match:
-                    try:
-                        data = json.loads(match.group(0))
-                    except:
-                        data = {}
-                else:
-                    data = {}
-            
-            if data:
-                tasks_data = data.get("tasks", [])
-                formatted_tasks = []
-                for t in tasks_data:
-                    # Handle flexible schema from LLM
-                    title = t.get("title") or t.get("task") or "Untitled Task"
-                    description = t.get("description") or t.get("summary") or title
-                    status = t.get("status") or "Pending"
-                    formatted_tasks.append(Task(title=title, description=description, status=status))
 
-                return RagResponse(
-                    summary=data.get("summary", ""),
-                    key_insights=data.get("key_insights", []),
-                    tasks=formatted_tasks,
-                    faithfulness_score=data.get("faithfulness_score", 0.0),
-                    critique=data.get("critique", "Self-correction failed."),
-                    sources=source_filenames
-                )
-            
-            # Fallback
-            return RagResponse(
-                summary=text[:500] + "...",
-                key_insights=["Could not parse structured insights."],
-                tasks=[],
-                faithfulness_score=0.1,
-                critique="Failed to parse structured response. Low confidence.",
-                sources=source_filenames
+            program = LLMTextCompletionProgram.from_defaults(
+                output_cls=RagResponse,
+                prompt_template_str=prompt_template_str,
+                llm=Settings.llm
             )
+            
+            response_obj = program(
+                context_str=context_str, 
+                query_str=query_str,
+                prerequisite_context=prerequisite_context
+            )
+            response_obj.sources = source_filenames
+            
+            return response_obj
 
         app.state.custom_query_fn = custom_query
-        logging.info("🚀 Advanced RAG System Ready (Hybrid + Rerank + Graph)")
+        logging.info("Advanced RAG System Ready (Hybrid + Rerank + Graph)")
         
     except Exception as e:
         logging.error(f"Failed to initialize RAG system: {e}")
@@ -236,6 +193,52 @@ def query_rag(request: QueryRequest):
     except Exception as e:
         logging.error(f"Error processing query: {request.query} - {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/upload")
+async def upload_files(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
+    """Upload documents and trigger background ingestion"""
+    from .ingest import ingest_documents
+    
+    if not os.path.exists(config.DOCS_DIR):
+        os.makedirs(config.DOCS_DIR)
+        
+    uploaded_files = []
+    for file in files:
+        file_path = os.path.join(config.DOCS_DIR, file.filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        uploaded_files.append(file.filename)
+    
+    def run_ingestion():
+        try:
+            logging.info(f"Triggering auto-ingestion for uploaded files...")
+            results = ingest_documents(reset_db=False)
+            logging.info(f"Auto-ingestion completed: {results}")
+        except Exception as e:
+            logging.error(f"Auto-ingestion failed: {e}")
+
+    background_tasks.add_task(run_ingestion)
+    
+    return {
+        "message": f"Successfully uploaded {len(uploaded_files)} files. Ingestion started in background.", 
+        "files": uploaded_files
+    }
+
+@app.post("/ingest")
+async def trigger_ingestion(background_tasks: BackgroundTasks, reset: bool = False):
+    """Trigger the document ingestion process in the background"""
+    from .ingest import ingest_documents
+    
+    def run_ingestion():
+        try:
+            logging.info("Starting background ingestion...")
+            results = ingest_documents(reset_db=reset)
+            logging.info(f"Background ingestion completed: {results}")
+        except Exception as e:
+            logging.error(f"Background ingestion failed: {e}")
+
+    background_tasks.add_task(run_ingestion)
+    return {"message": "Ingestion process started in the background"}
 
 if __name__ == "__main__":
     import uvicorn
